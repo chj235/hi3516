@@ -35,6 +35,8 @@
 #include "osd_img.h"
 #include "posix_help.h"
 #include "sample_media_ai.h"
+#include "cnn_emotion_classify.h"
+
 
 #ifdef __cplusplus
 #if __cplusplus
@@ -1788,7 +1790,35 @@ static HI_VOID CnnTrashClassifyAiProcess(VIDEO_FRAME_INFO_S frm)
                 ret, g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
         }
 }
+// 在CnnTrashClassifyAiProcess函数后添加情绪分类处理函数
+static HI_VOID EmotionClassifyAiProcess(VIDEO_FRAME_INFO_S frm)
+{
+    int ret;
+    if (GetCfgBool("emotion_classify_switch:support_emotion_classify", true)) {
+        if (g_workPlug.model == 0) {
+            HI_ASSERT(!g_aicMediaInfo.osds);
+            g_aicMediaInfo.osds = OsdsCreate(HI_OSD_BINDMOD_VPSS, g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
+            HI_ASSERT(g_aicMediaInfo.osds);
+            ret = CnnEmotionClassifyLoadModel(&g_workPlug.model, g_aicMediaInfo.osds);
+            if (ret < 0) {
+                g_workPlug.model = 0;
+                SAMPLE_CHECK_EXPR_GOTO(ret < 0, EMOTION_RELEASE,
+                    "load emotion classify model err(%#x)\n", ret);
+            }
+        }
+        VIDEO_FRAME_INFO_S *resFrm = NULL;
+        ret = CnnEmotionClassifyCal(g_workPlug.model, &frm, resFrm);
+        SAMPLE_CHECK_EXPR_GOTO(ret < 0, EMOTION_RELEASE,
+            "emotion classify plug cal FAIL, ret=%#x\n", ret);
+    }
 
+EMOTION_RELEASE:
+        ret = HI_MPI_VPSS_ReleaseChnFrame(g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0, &frm);
+        if (ret != HI_SUCCESS) {
+            SAMPLE_PRT("Error(%#x),HI_MPI_VPSS_ReleaseChnFrame failed,Grp(%d) chn(%d)!\n",
+                ret, g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
+        }
+}
 static HI_VOID* GetVpssChnFrameCnnTrashClassify(HI_VOID* arg)
 {
     int ret;
@@ -1818,7 +1848,36 @@ static HI_VOID* GetVpssChnFrameCnnTrashClassify(HI_VOID* arg)
 
     return HI_NULL;
 }
+// 在GetVpssChnFrameCnnTrashClassify函数后添加
+static HI_VOID* GetVpssChnFrameEmotionClassify(HI_VOID* arg)
+{
+    int ret;
+    VIDEO_FRAME_INFO_S frm;
+    HI_S32 s32MilliSec = 20000;
 
+    while (HI_FALSE == g_bAiProcessStopSignal) {
+        ret = HI_MPI_VPSS_GetChnFrame(g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0, &frm, s32MilliSec);
+        if (ret != 0) {
+            SAMPLE_PRT("HI_MPI_VPSS_GetChnFrame FAIL, err=%#x, grp=%d, chn=%d\n",
+                ret, g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
+            ret = HI_MPI_VPSS_ReleaseChnFrame(g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0, &frm);
+            if (ret != HI_SUCCESS) {
+                SAMPLE_PRT("Error(%#x),HI_MPI_VPSS_ReleaseChnFrame failed,Grp(%d) chn(%d)!\n",
+                    ret, g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
+            }
+            continue;
+        }
+        SAMPLE_PRT("get vpss frame success, weight:%d, height:%d\n", frm.stVFrame.u32Width, frm.stVFrame.u32Height);
+
+        if (g_num == 0) {
+            ConfBaseInit(AI_SAMPLE_CFG_FILE);
+            g_num++;
+        }
+        EmotionClassifyAiProcess(frm);
+    }
+
+    return HI_NULL;
+}
 static HI_VOID HandClassifyAiProcess(VIDEO_FRAME_INFO_S frm, VO_LAYER voLayer, VO_CHN voChn)
 {
     int ret;
@@ -1962,7 +2021,18 @@ static HI_S32 CnnTrashAiThreadProcess(HI_VOID)
 
     return s32Ret;
 }
+// 在CnnTrashAiThreadProcess函数后添加
+static HI_S32 EmotionClassifyAiThreadProcess(HI_VOID)
+{
+    HI_S32 s32Ret;
+    if (snprintf_s(acThreadName, BUFFER_SIZE, BUFFER_SIZE - 1, "AIEmotionProcess") < 0) {
+        HI_ASSERT(0);
+    }
+    prctl(PR_SET_NAME, (unsigned long)acThreadName, 0, 0, 0);
+    s32Ret = pthread_create(&g_aiProcessThread, NULL, GetVpssChnFrameEmotionClassify, NULL);
 
+    return s32Ret;
+}
 static HI_S32 HandClassifyAiThreadProcess(HI_VOID)
 {
     HI_S32 s32Ret;
@@ -1997,7 +2067,25 @@ static HI_S32 PauseDoUnloadCnnModel(HI_VOID)
 
     return s32Ret;
 }
+// 在PauseDoUnloadCnnModel函数后添加
+static HI_S32 PauseDoUnloadEmotionModel(HI_VOID)
+{
+    HI_S32 s32Ret = HI_SUCCESS;
 
+    if (GetCfgBool("emotion_classify_switch:support_emotion_classify", true)) {
+        if (memset_s(&g_workPlug, sizeof(g_workPlug), 0x00, sizeof(g_workPlug)) != EOK) {
+            HI_ASSERT(0);
+        }
+        s32Ret = CnnEmotionClassifyUnloadModel(g_workPlug.model);
+        SAMPLE_CHECK_EXPR_RET(s32Ret != HI_SUCCESS, s32Ret, "unload emotion model err:%x\n", s32Ret);
+        ConfBaseExt();
+        g_num = 0;
+        OsdsClear(g_aicMediaInfo.osds);
+        OsdsDestroy(g_aicMediaInfo.osds);
+    }
+
+    return s32Ret;
+}
 static HI_S32 PauseDoUnloadHandClassifyModel(HI_VOID)
 {
     HI_S32 s32Ret = HI_SUCCESS;
@@ -2138,7 +2226,83 @@ EXIT:
     SAMPLE_COMM_SYS_Exit();
     return s32Ret;
 }
+// 在SAMPLE_MEDIA_HAND_CLASSIFY函数后添加情绪分类主函数
+HI_S32 SAMPLE_MEDIA_CNN_EMOTION_CLASSIFY(HI_VOID)
+{
+    HI_S32             s32Ret;
+    HI_S32             fd = 0;
 
+    // 配置VI参数（与垃圾分类相同）
+    ViPramCfg();
+
+    // 获取传感器尺寸
+    s32Ret = SAMPLE_COMM_VI_GetSizeBySensor(g_aicMediaInfo.viCfg.astViInfo[0].stSnsInfo.enSnsType,
+        &g_aicMediaInfo.enPicSize);
+    SAMPLE_CHECK_EXPR_RET(s32Ret != HI_SUCCESS, s32Ret, "get pic size by sensor fail, s32Ret=%#x\n", s32Ret);
+
+    // 获取图片尺寸
+    s32Ret = SAMPLE_COMM_SYS_GetPicSize(g_aicMediaInfo.enPicSize, &g_aicMediaInfo.stSize);
+    SAMPLE_PRT("AIC: snsMaxSize=%ux%u\n", g_aicMediaInfo.stSize.u32Width, g_aicMediaInfo.stSize.u32Height);
+    SAMPLE_CHECK_EXPR_RET(s32Ret != HI_SUCCESS, s32Ret, "get picture size failed, s32Ret=%#x\n", s32Ret);
+
+    // 配置VB参数
+    StVbParamCfg(&g_aicMediaInfo.vbCfg);
+
+    // 系统初始化
+    s32Ret = SAMPLE_COMM_SYS_Init(&g_aicMediaInfo.vbCfg);
+    SAMPLE_CHECK_EXPR_RET(s32Ret != HI_SUCCESS, s32Ret, "system init failed, s32Ret=%#x\n", s32Ret);
+
+    // 配置MIPI显示
+    s32Ret = SAMPLE_VO_CONFIG_MIPI(&fd);
+    SAMPLE_CHECK_EXPR_GOTO(s32Ret != HI_SUCCESS, EXIT, "CONFIG MIPI FAIL.s32Ret:0x%x\n", s32Ret);
+
+    // 配置VPSS
+    VpssParamCfg();
+    s32Ret = ViVpssCreate(&g_aicMediaInfo.viSess, &g_aicMediaInfo.viCfg, &g_aicMediaInfo.vpssCfg);
+    SAMPLE_CHECK_EXPR_GOTO(s32Ret != HI_SUCCESS, EXIT1, "ViVpss Sess create FAIL, ret=%#x\n", s32Ret);
+    g_aicMediaInfo.vpssGrp = AIC_VPSS_GRP;
+    g_aicMediaInfo.vpssChn0 = AIC_VPSS_ZOUT_CHN;
+
+    // 配置VO
+    StVoParamCfg(&g_aicMediaInfo.voCfg);
+
+    // 启动VO
+    s32Ret = SampleCommVoStartMipi(&g_aicMediaInfo.voCfg);
+    SAMPLE_CHECK_EXPR_GOTO(s32Ret != HI_SUCCESS, EXIT1, "start vo FAIL. s32Ret: 0x%x\n", s32Ret);
+
+    // VPSS绑定VO
+    s32Ret = SAMPLE_COMM_VPSS_Bind_VO(g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0, g_aicMediaInfo.voCfg.VoDev, 0);
+    SAMPLE_CHECK_EXPR_GOTO(s32Ret != HI_SUCCESS, EXIT2, "vo bind vpss FAIL. s32Ret: 0x%x\n", s32Ret);
+    SAMPLE_PRT("vpssGrp:%d, vpssChn:%d\n", g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0);
+
+    // 创建情绪分类线程
+    s32Ret = EmotionClassifyAiThreadProcess();
+    SAMPLE_CHECK_EXPR_RET(s32Ret != HI_SUCCESS, s32Ret, "emotion proccess thread creat fail:%s\n", strerror(s32Ret));
+    
+    Pause();
+    g_bAiProcessStopSignal = HI_TRUE;
+    pthread_join(g_aiProcessThread, NULL);
+    g_aiProcessThread = 0;
+    PauseDoUnloadEmotionModel();
+
+    // 清理资源
+    SAMPLE_COMM_VPSS_UnBind_VO(g_aicMediaInfo.vpssGrp, g_aicMediaInfo.vpssChn0, g_aicMediaInfo.voCfg.VoDev, 0);
+    SAMPLE_VO_DISABLE_MIPITx(fd);
+    SampleCloseMipiTxFd(fd);
+    system("echo 0 > /sys/class/gpio/gpio55/value");
+
+EXIT2:
+    SAMPLE_COMM_VO_StopVO(&g_aicMediaInfo.voCfg);
+EXIT1:
+    VpssStop(&g_aicMediaInfo.vpssCfg);
+    SAMPLE_COMM_VI_UnBind_VPSS(g_aicMediaInfo.viCfg.astViInfo[0].stPipeInfo.aPipe[0],
+        g_aicMediaInfo.viCfg.astViInfo[0].stChnInfo.ViChn, g_aicMediaInfo.vpssGrp);
+    ViStop(&g_aicMediaInfo.viCfg);
+    free(g_aicMediaInfo.viSess);
+EXIT:
+    SAMPLE_COMM_SYS_Exit();
+    return s32Ret;
+}
 /*
  * 将sensor采集到数据显示到液晶屏上，同时创建线程运行手部检测和手势分类推理计算
  * 视频输入->视频处理子系统->视频输出->显示屏
