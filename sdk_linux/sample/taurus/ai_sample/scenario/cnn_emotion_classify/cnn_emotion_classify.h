@@ -8,9 +8,6 @@
 #include "hi_comm_video.h"
 #include "osd_img.h"
 
-// 更新模型路径
-#define MODEL_FILE_EMOTION    "/userdata/models/cnn_emotion_classify/emotion_inst.wk"
-
 // 情感分类阈值
 #define THRESH_MIN          30      // 可接受的置信度阈值
 
@@ -30,7 +27,14 @@ typedef enum {
 extern "C" {
 #endif
 
-// 函数名更新为情绪分类
+// 输入尺寸
+#define FRM_WIDTH           224
+#define FRM_HEIGHT          224
+
+// 情感类别数量
+#define EMOTION_CLASSES     7
+
+// 函数声明
 HI_S32 CnnEmotionClassifyLoadModel(uintptr_t* model, OsdSet* osds);
 HI_S32 CnnEmotionClassifyUnloadModel(uintptr_t model);
 HI_S32 CnnEmotionClassifyCal(uintptr_t model, VIDEO_FRAME_INFO_S *srcFrm, VIDEO_FRAME_INFO_S *resFrm);
