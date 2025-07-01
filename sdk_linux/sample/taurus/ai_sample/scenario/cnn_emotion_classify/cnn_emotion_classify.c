@@ -1,9 +1,3 @@
-/* 
- * 情绪分类实现 - 基于ResNet18模型
- * 输入: 224x224 YUV420SP图像
- * 输出: 7种情绪分类
- */
-
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -19,7 +13,7 @@
 #include "audio_aac_adp.h"
 #include "base_interface.h"
 #include "osd_img.h"
-#include "cnn_emotion_classify.h" // 更新头文件名
+#include "cnn_emotion_classify.h"
 
 #ifdef __cplusplus
 #if __cplusplus
@@ -27,16 +21,8 @@ extern "C" {
 #endif
 #endif /* End of #ifdef __cplusplus */
 
-// 更新模型路径
-// #define MODEL_FILE_TRASH    "/userdata/models/cnn_trash_classify/resnet_inst.wk" // 注释掉
+// 模型路径
 #define MODEL_FILE_EMOTION    "/userdata/models/cnn_emotion_classify/emotion_inst.wk"
-
-// 输入尺寸改为224x224
-#define FRM_WIDTH           224
-#define FRM_HEIGHT          224
-
-// 情感类别数量
-#define EMOTION_CLASSES     7
 
 // 情感类别名称映射
 static const char* EmotionNames[] = {
@@ -50,12 +36,13 @@ static const char* EmotionNames[] = {
     [EMOTION_UNKNOWN] = "Unknown"
 };
 
-// 全局变量 (与垃圾分类类似，但重命名)
+// 全局变量
 static int g_emotionNum = -1;
 static int g_count = 0;
-#define AUDIO_CASE_TWO     2
 #define AUDIO_SCORE        40       // 可自行配置的置信度
 #define AUDIO_FRAME        14       // 每15帧识别一次
+#define SCORE_MAX          4096     // 最大分数值
+#define RET_NUM_MAX        1        // 只需要最高分结果
 
 static HI_BOOL g_bAudioProcessStopSignal = HI_FALSE;
 static pthread_t g_audioProcessThread = 0;
@@ -67,7 +54,7 @@ static SkPair g_stmChn = {
     .out = -1
 };
 
-/* 音频播放函数 - 修改为播放情绪 */
+/* 音频播放函数 */
 static HI_VOID PlayEmotionAudio(const RecogNumInfo items)
 {
     if  (g_count < AUDIO_FRAME) {
@@ -87,7 +74,22 @@ static HI_VOID PlayEmotionAudio(const RecogNumInfo items)
     g_count = 0;
 }
 
-/* 模型加载函数 - 修改模型路径 */
+static HI_VOID* GetAudioFileName(HI_VOID* arg)
+{
+    RecogNumInfo resBuf = {0};
+    int ret;
+
+    while (g_bAudioProcessStopSignal == HI_FALSE) {
+        ret = FdReadMsg(g_stmChn.in, &resBuf, sizeof(RecogNumInfo));
+        if (ret == sizeof(RecogNumInfo)) {
+            PlayEmotionAudio(resBuf);
+        }
+    }
+
+    return NULL;
+}
+
+/* 模型加载函数 */
 HI_S32 CnnEmotionClassifyLoadModel(uintptr_t* model, OsdSet* osds)
 {
     SAMPLE_SVP_NNIE_CFG_S *self = NULL;
@@ -142,8 +144,8 @@ HI_S32 CnnEmotionClassifyUnloadModel(uintptr_t model)
     return HI_SUCCESS;
 }
 
-/* 结果处理函数 - 修改为处理情绪分类 */
-static HI_S32 CnnEmotionClassifyFlag(const RecogNumInfo items[], HI_S32 itemNum, HI_CHAR* buf, HI_S32 size)
+/* 结果处理函数 */
+static HI_S32 ProcessEmotionResults(const RecogNumInfo items[], HI_S32 itemNum, HI_CHAR* buf, HI_S32 size)
 {
     HI_S32 offset = 0;
     EmotionType emotionType = EMOTION_UNKNOWN;
@@ -165,20 +167,11 @@ static HI_S32 CnnEmotionClassifyFlag(const RecogNumInfo items[], HI_S32 itemNum,
         // 更新最高分
         if (score > maxScore) {
             maxScore = score;
-            switch (item->num) {
-                case 0: emotionType = EMOTION_NEUTRAL; break;
-                case 1: emotionType = EMOTION_HAPPY; break;
-                case 2: emotionType = EMOTION_SAD; break;
-                case 3: emotionType = EMOTION_SURPRISE; break;
-                case 4: emotionType = EMOTION_FEAR; break;
-                case 5: emotionType = EMOTION_DISGUST; break;
-                case 6: emotionType = EMOTION_ANGER; break;
-                default: emotionType = EMOTION_UNKNOWN; break;
-            }
+            emotionType = (EmotionType)item->num;
         }
     }
     
-    if (emotionType != EMOTION_UNKNOWN) {
+    if (emotionType < EMOTION_UNKNOWN) {
         offset += snprintf_s(buf + offset, size - offset, size - offset - 1,
             "%s %d%%", EmotionNames[emotionType], maxScore);
     } else {
@@ -190,27 +183,27 @@ static HI_S32 CnnEmotionClassifyFlag(const RecogNumInfo items[], HI_S32 itemNum,
     return HI_SUCCESS;
 }
 
-/* 主推理函数 - 修改输入尺寸和结果处理 */
+/* 主推理函数 */
 HI_S32 CnnEmotionClassifyCal(uintptr_t model, VIDEO_FRAME_INFO_S *srcFrm, VIDEO_FRAME_INFO_S *resFrm)
 {
     SAMPLE_SVP_NNIE_CFG_S *self = (SAMPLE_SVP_NNIE_CFG_S*)model;
     VIDEO_FRAME_INFO_S resizeFrm;
     IVE_IMAGE_S img;
-    static HI_CHAR prevOsd[NORM_BUF_SIZE] = "";
-    HI_CHAR osdBuf[NORM_BUF_SIZE] = "";
+    static HI_CHAR prevOsd[256] = "";
+    HI_CHAR osdBuf[256] = "";
     RecogNumInfo resBuf[RET_NUM_MAX] = {0};
     HI_S32 resLen = 0;
     HI_S32 ret;
     IVE_IMAGE_S imgIn;
 
-    // 1. 缩放至224x224 (情绪分类模型要求)
+    // 1. 缩放至224x224
     ret = MppFrmResize(srcFrm, &resizeFrm, FRM_WIDTH, FRM_HEIGHT);
     if (ret != HI_SUCCESS) {
         SAMPLE_PRT("Resize to %dx%d failed! ret=0x%x\n", FRM_WIDTH, FRM_HEIGHT, ret);
         return ret;
     }
 
-    // 2. 转换为YUV图像结构 (VVU420SP格式)
+    // 2. 转换为YUV图像结构
     ret = FrmToOrigImg(&resizeFrm, &img);
     if (ret != HI_SUCCESS) {
         SAMPLE_PRT("Convert to YUV failed! ret=0x%x\n", ret);
@@ -218,11 +211,11 @@ HI_S32 CnnEmotionClassifyCal(uintptr_t model, VIDEO_FRAME_INFO_S *srcFrm, VIDEO_
         return ret;
     }
 
-    // 3. 直接使用整张图像 (情绪分类不需要裁剪)
+    // 3. 使用整张图像
     imgIn = img;
 
     // 4. 执行推理
-    ret = CnnCalImg(self, &imgIn, resBuf, sizeof(resBuf) / sizeof((resBuf)[0]), &resLen);
+    ret = CnnCalImg(self, &imgIn, resBuf, RET_NUM_MAX, &resLen);
     if (ret < 0) {
         SAMPLE_PRT("Emotion inference failed! ret=0x%x\n", ret);
         goto cleanup;
@@ -246,7 +239,7 @@ HI_S32 CnnEmotionClassifyCal(uintptr_t model, VIDEO_FRAME_INFO_S *srcFrm, VIDEO_
     if (strcmp(osdBuf, prevOsd) != 0) {
         strcpy(prevOsd, osdBuf);
         HI_OSD_ATTR_S rgn;
-        TxtRgnInit(&rgn, osdBuf, TXT_BEGX, TXT_BEGY, ARGB1555_YELLOW2);
+        TxtRgnInit(&rgn, osdBuf, 20, 20, 0xFF00); // 黄色文字
         OsdsSetRgn(g_osdsEmotion, g_osd0Emotion, &rgn);
         
         // 发送到VPSS
