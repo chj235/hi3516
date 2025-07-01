@@ -167,7 +167,7 @@ typedef struct AicMediaInfo {
 	
     OsdSet *osds; // OSD set for Plug to output OSD in resFrm
 } AicMediaInfo;
-
+HI_S32 SAMPLE_MEDIA_CNN_EMOTION_CLASSIFY(HI_VOID); 
 HI_S32 SAMPLE_MEDIA_CNN_TRASH_CLASSIFY(HI_VOID);
 HI_S32 SampleCommVoStartDevMipi(VO_DEV VoDev, VO_PUB_ATTR_S* pstPubAttr);
 HI_S32 SAMPLE_MEDIA_HAND_CLASSIFY(HI_VOID);
