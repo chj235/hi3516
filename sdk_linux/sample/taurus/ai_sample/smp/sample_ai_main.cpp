@@ -44,6 +44,7 @@ static void SAMPLE_AI_Usage(char* pchPrgName)
     printf("\t 0) cnn trash_classify(resnet18).\n");
     printf("\t 1) hand classify(yolov2+resnet18).\n");
     printf("\t 2) tennis detect(opencv).\n");
+    printf("\t 3) emotion classify(resnet18).\n"); 
 }
 
 /*
@@ -80,6 +81,9 @@ int main(int argc, char *argv[])
         case '2':
             mediaOpencv.SAMPLE_MEDIA_TENNIS_DETECT();
             break;
+        case '3':  // 新增情绪分类入口
+            SAMPLE_MEDIA_CNN_EMOTION_CLASSIFY();  // 新增行
+            break;    
         default:
             SAMPLE_AI_Usage(argv[0]);
             break;
